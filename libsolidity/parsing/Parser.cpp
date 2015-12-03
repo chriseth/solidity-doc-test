@@ -88,7 +88,7 @@ ASTPointer<SourceUnit> Parser::parse(shared_ptr<Scanner> const& _scanner)
 		}
 		return nodeFactory.createNode<SourceUnit>(nodes);
 	}
-	catch (FatalError const& _error)
+	catch (FatalError const&)
 	{
 		if (m_errors.empty())
 			throw; // Something is weird here, rather throw again.
@@ -132,12 +132,6 @@ ASTPointer<ContractDefinition> Parser::parseContractDefinition(bool _isLibrary)
 	expectToken(_isLibrary ? Token::Library : Token::Contract);
 	ASTPointer<ASTString> name = expectIdentifierToken();
 	vector<ASTPointer<InheritanceSpecifier>> baseContracts;
-	vector<ASTPointer<StructDefinition>> structs;
-	vector<ASTPointer<EnumDefinition>> enums;
-	vector<ASTPointer<VariableDeclaration>> stateVariables;
-	vector<ASTPointer<FunctionDefinition>> functions;
-	vector<ASTPointer<ModifierDefinition>> modifiers;
-	vector<ASTPointer<EventDefinition>> events;
 	if (m_scanner->currentToken() == Token::Is)
 		do
 		{
@@ -145,6 +139,7 @@ ASTPointer<ContractDefinition> Parser::parseContractDefinition(bool _isLibrary)
 			baseContracts.push_back(parseInheritanceSpecifier());
 		}
 		while (m_scanner->currentToken() == Token::Comma);
+	vector<ASTPointer<ASTNode>> subNodes;
 	expectToken(Token::LBrace);
 	while (true)
 	{
@@ -152,11 +147,11 @@ ASTPointer<ContractDefinition> Parser::parseContractDefinition(bool _isLibrary)
 		if (currentTokenValue == Token::RBrace)
 			break;
 		else if (currentTokenValue == Token::Function)
-			functions.push_back(parseFunctionDefinition(name.get()));
+			subNodes.push_back(parseFunctionDefinition(name.get()));
 		else if (currentTokenValue == Token::Struct)
-			structs.push_back(parseStructDefinition());
+			subNodes.push_back(parseStructDefinition());
 		else if (currentTokenValue == Token::Enum)
-			enums.push_back(parseEnumDefinition());
+			subNodes.push_back(parseEnumDefinition());
 		else if (
 			currentTokenValue == Token::Identifier ||
 			currentTokenValue == Token::Mapping ||
@@ -166,13 +161,15 @@ ASTPointer<ContractDefinition> Parser::parseContractDefinition(bool _isLibrary)
 			VarDeclParserOptions options;
 			options.isStateVariable = true;
 			options.allowInitialValue = true;
-			stateVariables.push_back(parseVariableDeclaration(options));
+			subNodes.push_back(parseVariableDeclaration(options));
 			expectToken(Token::Semicolon);
 		}
 		else if (currentTokenValue == Token::Modifier)
-			modifiers.push_back(parseModifierDefinition());
+			subNodes.push_back(parseModifierDefinition());
 		else if (currentTokenValue == Token::Event)
-			events.push_back(parseEventDefinition());
+			subNodes.push_back(parseEventDefinition());
+		else if (currentTokenValue == Token::Using)
+			subNodes.push_back(parseUsingDirective());
 		else
 			fatalParserError(std::string("Function, variable, struct or modifier declaration expected."));
 	}
@@ -182,12 +179,7 @@ ASTPointer<ContractDefinition> Parser::parseContractDefinition(bool _isLibrary)
 		name,
 		docString,
 		baseContracts,
-		structs,
-		enums,
-		stateVariables,
-		functions,
-		modifiers,
-		events,
+		subNodes,
 		_isLibrary
 	);
 }
@@ -483,6 +475,24 @@ ASTPointer<EventDefinition> Parser::parseEventDefinition()
 	nodeFactory.markEndPosition();
 	expectToken(Token::Semicolon);
 	return nodeFactory.createNode<EventDefinition>(name, docstring, parameters, anonymous);
+}
+
+ASTPointer<UsingForDirective> Parser::parseUsingDirective()
+{
+	ASTNodeFactory nodeFactory(*this);
+
+	expectToken(Token::Using);
+	//@todo this should actually parse a full path.
+	ASTPointer<Identifier> library(parseIdentifier());
+	ASTPointer<TypeName> typeName;
+	expectToken(Token::For);
+	if (m_scanner->currentToken() == Token::Mul)
+		m_scanner->next();
+	else
+		typeName = parseTypeName(false);
+	nodeFactory.markEndPosition();
+	expectToken(Token::Semicolon);
+	return nodeFactory.createNode<UsingForDirective>(library, typeName);
 }
 
 ASTPointer<ModifierInvocation> Parser::parseModifierInvocation()
@@ -939,7 +949,7 @@ ASTPointer<Expression> Parser::parseLeftHandSideExpression(
 	else if (m_scanner->currentToken() == Token::New)
 	{
 		expectToken(Token::New);
-		ASTPointer<Identifier> contractName(parseIdentifier());
+		ASTPointer<TypeName> contractName(parseTypeName(false));
 		nodeFactory.setEndPositionFromNode(contractName);
 		expression = nodeFactory.createNode<NewExpression>(contractName);
 	}

@@ -76,6 +76,7 @@ private:
 	void checkLibraryRequirements(ContractDefinition const& _contract);
 
 	virtual void endVisit(InheritanceSpecifier const& _inheritance) override;
+	virtual void endVisit(UsingForDirective const& _usingFor) override;
 	virtual bool visit(StructDefinition const& _struct) override;
 	virtual bool visit(FunctionDefinition const& _function) override;
 	virtual bool visit(VariableDeclaration const& _variable) override;
@@ -107,13 +108,17 @@ private:
 	) const;
 
 	/// @returns the referenced declaration and throws on error.
-	Declaration const& dereference(Identifier const& _identifier);
+	Declaration const& dereference(Identifier const& _identifier) const;
+	/// @returns the referenced declaration and throws on error.
+	Declaration const& dereference(UserDefinedTypeName const& _typeName) const;
 
 	/// Runs type checks on @a _expression to infer its type and then checks that it is implicitly
 	/// convertible to @a _expectedType.
 	void expectType(Expression const& _expression, Type const& _expectedType);
 	/// Runs type checks on @a _expression to infer its type and then checks that it is an LValue.
 	void requireLValue(Expression const& _expression);
+
+	ContractDefinition const* m_scope = nullptr;
 
 	ErrorList& m_errors;
 };

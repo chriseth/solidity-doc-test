@@ -31,29 +31,13 @@ using namespace dev;
 using namespace dev::solidity;
 
 
-bool ReferencesResolver::visit(Return const& _return)
-{
-	_return.annotation().functionReturnParameters = m_returnParameters;
-	return true;
-}
-
-bool ReferencesResolver::visit(UserDefinedTypeName const& _typeName)
-{
-	Declaration const* declaration = m_resolver.pathFromCurrentScope(_typeName.namePath());
-	if (!declaration)
-		fatalDeclarationError(_typeName.location(), "Identifier not found or not unique.");
-
-	_typeName.annotation().referencedDeclaration = declaration;
-	return true;
-}
-
-bool ReferencesResolver::resolve(ASTNode& _root)
+bool ReferencesResolver::resolve(ASTNode const& _root)
 {
 	try
 	{
 		_root.accept(*this);
 	}
-	catch (FatalError const& e)
+	catch (FatalError const&)
 	{
 		solAssert(m_errorOccurred, "");
 	}
@@ -66,14 +50,72 @@ bool ReferencesResolver::visit(Identifier const& _identifier)
 	if (declarations.empty())
 		fatalDeclarationError(_identifier.location(), "Undeclared identifier.");
 	else if (declarations.size() == 1)
-	{
 		_identifier.annotation().referencedDeclaration = declarations.front();
-		_identifier.annotation().contractScope = m_currentContract;
-	}
 	else
 		_identifier.annotation().overloadedDeclarations =
 			m_resolver.cleanedDeclarations(_identifier, declarations);
 	return false;
+}
+
+bool ReferencesResolver::visit(ElementaryTypeName const& _typeName)
+{
+	_typeName.annotation().type = Type::fromElementaryTypeName(_typeName.typeName());
+	return true;
+}
+
+void ReferencesResolver::endVisit(UserDefinedTypeName const& _typeName)
+{
+	Declaration const* declaration = m_resolver.pathFromCurrentScope(_typeName.namePath());
+	if (!declaration)
+		fatalDeclarationError(_typeName.location(), "Identifier not found or not unique.");
+
+	_typeName.annotation().referencedDeclaration = declaration;
+
+	if (StructDefinition const* structDef = dynamic_cast<StructDefinition const*>(declaration))
+		_typeName.annotation().type = make_shared<StructType>(*structDef);
+	else if (EnumDefinition const* enumDef = dynamic_cast<EnumDefinition const*>(declaration))
+		_typeName.annotation().type = make_shared<EnumType>(*enumDef);
+	else if (ContractDefinition const* contract = dynamic_cast<ContractDefinition const*>(declaration))
+		_typeName.annotation().type = make_shared<ContractType>(*contract);
+	else
+		fatalTypeError(_typeName.location(), "Name has to refer to a struct, enum or contract.");
+}
+
+void ReferencesResolver::endVisit(Mapping const& _typeName)
+{
+	TypePointer keyType = _typeName.keyType().annotation().type;
+	TypePointer valueType = _typeName.valueType().annotation().type;
+	// Convert key type to memory.
+	keyType = ReferenceType::copyForLocationIfReference(DataLocation::Memory, keyType);
+	// Convert value type to storage reference.
+	valueType = ReferenceType::copyForLocationIfReference(DataLocation::Storage, valueType);
+	_typeName.annotation().type = make_shared<MappingType>(keyType, valueType);
+}
+
+void ReferencesResolver::endVisit(ArrayTypeName const& _typeName)
+{
+	TypePointer baseType = _typeName.baseType().annotation().type;
+	if (baseType->storageBytes() == 0)
+		fatalTypeError(_typeName.baseType().location(), "Illegal base type of storage size zero for array.");
+	if (Expression const* length = _typeName.length())
+	{
+		if (!length->annotation().type)
+			ConstantEvaluator e(*length);
+
+		auto const* lengthType = dynamic_cast<IntegerConstantType const*>(length->annotation().type.get());
+		if (!lengthType)
+			fatalTypeError(length->location(), "Invalid array length.");
+		else
+			_typeName.annotation().type = make_shared<ArrayType>(DataLocation::Storage, baseType, lengthType->literalValue(nullptr));
+	}
+	else
+		_typeName.annotation().type = make_shared<ArrayType>(DataLocation::Storage, baseType);
+}
+
+bool ReferencesResolver::visit(Return const& _return)
+{
+	_return.annotation().functionReturnParameters = m_returnParameters;
+	return true;
 }
 
 void ReferencesResolver::endVisit(VariableDeclaration const& _variable)
@@ -84,21 +126,23 @@ void ReferencesResolver::endVisit(VariableDeclaration const& _variable)
 	TypePointer type;
 	if (_variable.typeName())
 	{
-		type = typeFor(*_variable.typeName());
+		type = _variable.typeName()->annotation().type;
 		using Location = VariableDeclaration::Location;
-		Location loc = _variable.referenceLocation();
+		Location varLoc = _variable.referenceLocation();
+		DataLocation typeLoc = DataLocation::Memory;
 		// References are forced to calldata for external function parameters (not return)
 		// and memory for parameters (also return) of publicly visible functions.
 		// They default to memory for function parameters and storage for local variables.
 		// As an exception, "storage" is allowed for library functions.
 		if (auto ref = dynamic_cast<ReferenceType const*>(type.get()))
 		{
+			bool isPointer = true;
 			if (_variable.isExternalCallableParameter())
 			{
 				auto const& contract = dynamic_cast<ContractDefinition const&>(*_variable.scope()->scope());
 				if (contract.isLibrary())
 				{
-					if (loc == Location::Memory)
+					if (varLoc == Location::Memory)
 						fatalTypeError(_variable.location(),
 							"Location has to be calldata or storage for external "
 							"library functions (remove the \"memory\" keyword)."
@@ -107,50 +151,52 @@ void ReferencesResolver::endVisit(VariableDeclaration const& _variable)
 				else
 				{
 					// force location of external function parameters (not return) to calldata
-					if (loc != Location::Default)
+					if (varLoc != Location::Default)
 						fatalTypeError(_variable.location(),
 							"Location has to be calldata for external functions "
 							"(remove the \"memory\" or \"storage\" keyword)."
 						);
 				}
-				if (loc == Location::Default)
-					type = ref->copyForLocation(DataLocation::CallData, true);
+				if (varLoc == Location::Default)
+					typeLoc = DataLocation::CallData;
+				else
+					typeLoc = varLoc == Location::Memory ? DataLocation::Memory : DataLocation::Storage;
 			}
 			else if (_variable.isCallableParameter() && _variable.scope()->isPublic())
 			{
 				auto const& contract = dynamic_cast<ContractDefinition const&>(*_variable.scope()->scope());
 				// force locations of public or external function (return) parameters to memory
-				if (loc == Location::Storage && !contract.isLibrary())
+				if (varLoc == Location::Storage && !contract.isLibrary())
 					fatalTypeError(_variable.location(),
 						"Location has to be memory for publicly visible functions "
 						"(remove the \"storage\" keyword)."
 					);
-				if (loc == Location::Default || !contract.isLibrary())
-					type = ref->copyForLocation(DataLocation::Memory, true);
+				if (varLoc == Location::Default || !contract.isLibrary())
+					typeLoc = DataLocation::Memory;
+				else
+					typeLoc = varLoc == Location::Memory ? DataLocation::Memory : DataLocation::Storage;
 			}
 			else
 			{
 				if (_variable.isConstant())
 				{
-					if (loc != Location::Default && loc != Location::Memory)
+					if (varLoc != Location::Default && varLoc != Location::Memory)
 						fatalTypeError(
 							_variable.location(),
 							"Storage location has to be \"memory\" (or unspecified) for constants."
 						);
-					loc = Location::Memory;
+					typeLoc = DataLocation::Memory;
 				}
-				if (loc == Location::Default)
-					loc = _variable.isCallableParameter() ? Location::Memory : Location::Storage;
-				bool isPointer = !_variable.isStateVariable();
-				type = ref->copyForLocation(
-					loc == Location::Memory ?
-					DataLocation::Memory :
-					DataLocation::Storage,
-					isPointer
-				);
+				else if (varLoc == Location::Default)
+					typeLoc = _variable.isCallableParameter() ? DataLocation::Memory : DataLocation::Storage;
+				else
+					typeLoc = varLoc == Location::Memory ? DataLocation::Memory : DataLocation::Storage;
+				isPointer = !_variable.isStateVariable();
 			}
+
+			type = ref->copyForLocation(typeLoc, isPointer);
 		}
-		else if (loc != Location::Default && !ref)
+		else if (varLoc != Location::Default && !ref)
 			fatalTypeError(_variable.location(), "Storage location can only be given for array or struct types.");
 
 		if (!type)
@@ -162,61 +208,6 @@ void ReferencesResolver::endVisit(VariableDeclaration const& _variable)
 	// otherwise we have a "var"-declaration whose type is resolved by the first assignment
 
 	_variable.annotation().type = type;
-}
-
-TypePointer ReferencesResolver::typeFor(TypeName const& _typeName)
-{
-	if (_typeName.annotation().type)
-		return _typeName.annotation().type;
-
-	TypePointer type;
-	if (auto elemTypeName = dynamic_cast<ElementaryTypeName const*>(&_typeName))
-		type = Type::fromElementaryTypeName(elemTypeName->typeName());
-	else if (auto typeName = dynamic_cast<UserDefinedTypeName const*>(&_typeName))
-	{
-		Declaration const* declaration = typeName->annotation().referencedDeclaration;
-		solAssert(!!declaration, "");
-
-		if (StructDefinition const* structDef = dynamic_cast<StructDefinition const*>(declaration))
-			type = make_shared<StructType>(*structDef);
-		else if (EnumDefinition const* enumDef = dynamic_cast<EnumDefinition const*>(declaration))
-			type = make_shared<EnumType>(*enumDef);
-		else if (ContractDefinition const* contract = dynamic_cast<ContractDefinition const*>(declaration))
-			type = make_shared<ContractType>(*contract);
-		else
-			fatalTypeError(typeName->location(), "Name has to refer to a struct, enum or contract.");
-	}
-	else if (auto mapping = dynamic_cast<Mapping const*>(&_typeName))
-	{
-		TypePointer keyType = typeFor(mapping->keyType());
-		TypePointer valueType = typeFor(mapping->valueType());
-		// Convert key type to memory.
-		keyType = ReferenceType::copyForLocationIfReference(DataLocation::Memory, keyType);
-		// Convert value type to storage reference.
-		valueType = ReferenceType::copyForLocationIfReference(DataLocation::Storage, valueType);
-		type = make_shared<MappingType>(keyType, valueType);
-	}
-	else if (auto arrayType = dynamic_cast<ArrayTypeName const*>(&_typeName))
-	{
-		TypePointer baseType = typeFor(arrayType->baseType());
-		if (baseType->storageBytes() == 0)
-			fatalTypeError(arrayType->baseType().location(), "Illegal base type of storage size zero for array.");
-		if (Expression const* length = arrayType->length())
-		{
-			if (!length->annotation().type)
-				ConstantEvaluator e(*length);
-
-			auto const* lengthType = dynamic_cast<IntegerConstantType const*>(length->annotation().type.get());
-			if (!lengthType)
-				fatalTypeError(length->location(), "Invalid array length.");
-			else
-				type = make_shared<ArrayType>(DataLocation::Storage, baseType, lengthType->literalValue(nullptr));
-		}
-		else
-			type = make_shared<ArrayType>(DataLocation::Storage, baseType);
-	}
-
-	return _typeName.annotation().type = move(type);
 }
 
 void ReferencesResolver::typeError(SourceLocation const& _location, string const& _description)

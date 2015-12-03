@@ -58,17 +58,21 @@ public:
 	virtual void accept(ASTVisitor& _visitor) = 0;
 	virtual void accept(ASTConstVisitor& _visitor) const = 0;
 	template <class T>
-	static void listAccept(std::vector<ASTPointer<T>>& _list, ASTVisitor& _visitor)
+	static void listAccept(std::vector<T> const& _list, ASTVisitor& _visitor)
 	{
-		for (ASTPointer<T>& element: _list)
+		for (T const& element: _list)
 			element->accept(_visitor);
 	}
 	template <class T>
-	static void listAccept(std::vector<ASTPointer<T>> const& _list, ASTConstVisitor& _visitor)
+	static void listAccept(std::vector<T> const& _list, ASTConstVisitor& _visitor)
 	{
-		for (ASTPointer<T> const& element: _list)
+		for (T const& element: _list)
 			element->accept(_visitor);
 	}
+
+	/// @returns a copy of the vector containing only the nodes which derive from T.
+	template <class _T>
+	static std::vector<_T const*> filteredNodes(std::vector<ASTPointer<ASTNode>> const& _nodes);
 
 	/// Returns the source code location of this node.
 	SourceLocation const& location() const { return m_location; }
@@ -94,6 +98,16 @@ protected:
 private:
 	SourceLocation m_location;
 };
+
+template <class _T>
+std::vector<_T const*> ASTNode::filteredNodes(std::vector<ASTPointer<ASTNode>> const& _nodes)
+{
+	std::vector<_T const*> ret;
+	for (auto const& n: _nodes)
+		if (auto const* nt = dynamic_cast<_T const*>(n.get()))
+			ret.push_back(nt);
+	return ret;
+}
 
 /**
  * Source unit containing import directives and contract definitions.
@@ -168,7 +182,7 @@ public:
 	/// The current contract has to be given since this context can change the type, especially of
 	/// contract types.
 	/// This can only be called once types of variable declarations have already been resolved.
-	virtual TypePointer type(ContractDefinition const* m_currentContract = nullptr) const = 0;
+	virtual TypePointer type() const = 0;
 
 protected:
 	virtual Visibility defaultVisibility() const { return Visibility::Public; }
@@ -238,23 +252,13 @@ public:
 		ASTPointer<ASTString> const& _name,
 		ASTPointer<ASTString> const& _documentation,
 		std::vector<ASTPointer<InheritanceSpecifier>> const& _baseContracts,
-		std::vector<ASTPointer<StructDefinition>> const& _definedStructs,
-		std::vector<ASTPointer<EnumDefinition>> const& _definedEnums,
-		std::vector<ASTPointer<VariableDeclaration>> const& _stateVariables,
-		std::vector<ASTPointer<FunctionDefinition>> const& _definedFunctions,
-		std::vector<ASTPointer<ModifierDefinition>> const& _functionModifiers,
-		std::vector<ASTPointer<EventDefinition>> const& _events,
+		std::vector<ASTPointer<ASTNode>> const& _subNodes,
 		bool _isLibrary
 	):
 		Declaration(_location, _name),
 		Documented(_documentation),
 		m_baseContracts(_baseContracts),
-		m_definedStructs(_definedStructs),
-		m_definedEnums(_definedEnums),
-		m_stateVariables(_stateVariables),
-		m_definedFunctions(_definedFunctions),
-		m_functionModifiers(_functionModifiers),
-		m_events(_events),
+		m_subNodes(_subNodes),
 		m_isLibrary(_isLibrary)
 	{}
 
@@ -262,13 +266,15 @@ public:
 	virtual void accept(ASTConstVisitor& _visitor) const override;
 
 	std::vector<ASTPointer<InheritanceSpecifier>> const& baseContracts() const { return m_baseContracts; }
-	std::vector<ASTPointer<StructDefinition>> const& definedStructs() const { return m_definedStructs; }
-	std::vector<ASTPointer<EnumDefinition>> const& definedEnums() const { return m_definedEnums; }
-	std::vector<ASTPointer<VariableDeclaration>> const& stateVariables() const { return m_stateVariables; }
-	std::vector<ASTPointer<ModifierDefinition>> const& functionModifiers() const { return m_functionModifiers; }
-	std::vector<ASTPointer<FunctionDefinition>> const& definedFunctions() const { return m_definedFunctions; }
-	std::vector<ASTPointer<EventDefinition>> const& events() const { return m_events; }
-	std::vector<ASTPointer<EventDefinition>> const& interfaceEvents() const;
+	std::vector<ASTPointer<ASTNode>> const& subNodes() const { return m_subNodes; }
+	std::vector<UsingForDirective const*> usingForDirectives() const { return filteredNodes<UsingForDirective>(m_subNodes); }
+	std::vector<StructDefinition const*> definedStructs() const { return filteredNodes<StructDefinition>(m_subNodes); }
+	std::vector<EnumDefinition const*> definedEnums() const { return filteredNodes<EnumDefinition>(m_subNodes); }
+	std::vector<VariableDeclaration const*> stateVariables() const { return filteredNodes<VariableDeclaration>(m_subNodes); }
+	std::vector<ModifierDefinition const*> functionModifiers() const { return filteredNodes<ModifierDefinition>(m_subNodes); }
+	std::vector<FunctionDefinition const*> definedFunctions() const { return filteredNodes<FunctionDefinition>(m_subNodes); }
+	std::vector<EventDefinition const*> events() const { return filteredNodes<EventDefinition>(m_subNodes); }
+	std::vector<EventDefinition const*> const& interfaceEvents() const;
 	bool isLibrary() const { return m_isLibrary; }
 
 	/// @returns a map of canonical function signatures to FunctionDefinitions
@@ -290,18 +296,13 @@ public:
 	std::string const& devDocumentation() const;
 	void setDevDocumentation(std::string const& _devDocumentation);
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual ContractDefinitionAnnotation& annotation() const override;
 
 private:
 	std::vector<ASTPointer<InheritanceSpecifier>> m_baseContracts;
-	std::vector<ASTPointer<StructDefinition>> m_definedStructs;
-	std::vector<ASTPointer<EnumDefinition>> m_definedEnums;
-	std::vector<ASTPointer<VariableDeclaration>> m_stateVariables;
-	std::vector<ASTPointer<FunctionDefinition>> m_definedFunctions;
-	std::vector<ASTPointer<ModifierDefinition>> m_functionModifiers;
-	std::vector<ASTPointer<EventDefinition>> m_events;
+	std::vector<ASTPointer<ASTNode>> m_subNodes;
 	bool m_isLibrary;
 
 	// parsed Natspec documentation of the contract.
@@ -310,7 +311,7 @@ private:
 
 	std::vector<ContractDefinition const*> m_linearizedBaseContracts;
 	mutable std::unique_ptr<std::vector<std::pair<FixedHash<4>, FunctionTypePointer>>> m_interfaceFunctionList;
-	mutable std::unique_ptr<std::vector<ASTPointer<EventDefinition>>> m_interfaceEvents;
+	mutable std::unique_ptr<std::vector<EventDefinition const*>> m_interfaceEvents;
 	mutable std::unique_ptr<std::vector<Declaration const*>> m_inheritableMembers;
 };
 
@@ -335,6 +336,33 @@ private:
 	std::vector<ASTPointer<Expression>> m_arguments;
 };
 
+/**
+ * `using LibraryName for uint` will attach all functions from the library LibraryName
+ * to `uint` if the first parameter matches the type. `using LibraryName for *` attaches
+ * the function to any matching type.
+ */
+class UsingForDirective: public ASTNode
+{
+public:
+	UsingForDirective(
+		SourceLocation const& _location,
+		ASTPointer<Identifier> const& _libraryName,
+		ASTPointer<TypeName> const& _typeName
+	):
+		ASTNode(_location), m_libraryName(_libraryName), m_typeName(_typeName) {}
+
+	virtual void accept(ASTVisitor& _visitor) override;
+	virtual void accept(ASTConstVisitor& _visitor) const override;
+
+	Identifier const& libraryName() const { return *m_libraryName; }
+	/// @returns the type name the library is attached to, null for `*`.
+	TypeName const* typeName() const { return m_typeName.get(); }
+
+private:
+	ASTPointer<Identifier> m_libraryName;
+	ASTPointer<TypeName> m_typeName;
+};
+
 class StructDefinition: public Declaration
 {
 public:
@@ -350,7 +378,7 @@ public:
 
 	std::vector<ASTPointer<VariableDeclaration>> const& members() const { return m_members; }
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual TypeDeclarationAnnotation& annotation() const override;
 
@@ -372,7 +400,7 @@ public:
 
 	std::vector<ASTPointer<EnumValue>> const& members() const { return m_members; }
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual TypeDeclarationAnnotation& annotation() const override;
 
@@ -392,7 +420,7 @@ public:
 	virtual void accept(ASTVisitor& _visitor) override;
 	virtual void accept(ASTConstVisitor& _visitor) const override;
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 };
 
 /**
@@ -490,7 +518,7 @@ public:
 	/// arguments separated by commas all enclosed in parentheses without any spaces.
 	std::string externalSignature() const;
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual FunctionDefinitionAnnotation& annotation() const override;
 
@@ -551,7 +579,7 @@ public:
 	bool isConstant() const { return m_isConstant; }
 	Location referenceLocation() const { return m_location; }
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual VariableDeclarationAnnotation& annotation() const override;
 
@@ -593,7 +621,7 @@ public:
 
 	Block const& body() const { return *m_body; }
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual ModifierDefinitionAnnotation& annotation() const override;
 
@@ -649,7 +677,7 @@ public:
 
 	bool isAnonymous() const { return m_anonymous; }
 
-	virtual TypePointer type(ContractDefinition const* m_currentContract) const override;
+	virtual TypePointer type() const override;
 
 	virtual EventDefinitionAnnotation& annotation() const override;
 
@@ -675,7 +703,7 @@ public:
 		BOOST_THROW_EXCEPTION(InternalCompilerError() << errinfo_comment("MagicVariableDeclaration used inside real AST."));
 	}
 
-	virtual TypePointer type(ContractDefinition const*) const override { return m_type; }
+	virtual TypePointer type() const override { return m_type; }
 
 private:
 	std::shared_ptr<Type const> m_type;
@@ -1216,23 +1244,24 @@ private:
 };
 
 /**
- * Expression that creates a new contract, e.g. the "new SomeContract" part in "new SomeContract(1, 2)".
+ * Expression that creates a new contract or memory-array,
+ * e.g. the "new SomeContract" part in "new SomeContract(1, 2)".
  */
 class NewExpression: public Expression
 {
 public:
 	NewExpression(
 		SourceLocation const& _location,
-		ASTPointer<Identifier> const& _contractName
+		ASTPointer<TypeName> const& _typeName
 	):
-		Expression(_location), m_contractName(_contractName) {}
+		Expression(_location), m_typeName(_typeName) {}
 	virtual void accept(ASTVisitor& _visitor) override;
 	virtual void accept(ASTConstVisitor& _visitor) const override;
 
-	Identifier const& contractName() const { return *m_contractName; }
+	TypeName const& typeName() const { return *m_typeName; }
 
 private:
-	ASTPointer<Identifier> m_contractName;
+	ASTPointer<TypeName> m_typeName;
 };
 
 /**

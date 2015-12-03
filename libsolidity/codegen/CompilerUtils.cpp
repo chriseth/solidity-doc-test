@@ -266,6 +266,19 @@ void CompilerUtils::encodeToMemory(
 	popStackSlots(argSize + dynPointers + 1);
 }
 
+void CompilerUtils::zeroInitialiseMemoryArray(ArrayType const& _type)
+{
+	auto repeat = m_context.newTag();
+	m_context << repeat;
+	pushZeroValue(*_type.baseType());
+	storeInMemoryDynamic(*_type.baseType());
+	m_context << eth::Instruction::SWAP1 << u256(1) << eth::Instruction::SWAP1;
+	m_context << eth::Instruction::SUB << eth::Instruction::SWAP1;
+	m_context << eth::Instruction::DUP2;
+	m_context.appendConditionalJumpTo(repeat);
+	m_context << eth::Instruction::SWAP1 << eth::Instruction::POP;
+}
+
 void CompilerUtils::memoryCopy()
 {
 	// Stack here: size target source
@@ -529,7 +542,7 @@ void CompilerUtils::convertType(Type const& _typeOnStack, Type const& _targetTyp
 				allocateMemory();
 				m_context << eth::Instruction::SWAP1 << eth::Instruction::DUP2;
 				// stack: <memory ptr> <source ref> <memory ptr>
-				for (auto const& member: typeOnStack.members())
+				for (auto const& member: typeOnStack.members(nullptr))
 				{
 					if (!member.type->canLiveOutsideStorage())
 						continue;
@@ -613,7 +626,7 @@ void CompilerUtils::convertType(Type const& _typeOnStack, Type const& _targetTyp
 	}
 }
 
-void CompilerUtils::pushZeroValue(const Type& _type)
+void CompilerUtils::pushZeroValue(Type const& _type)
 {
 	auto const* referenceType = dynamic_cast<ReferenceType const*>(&_type);
 	if (!referenceType || referenceType->location() == DataLocation::Storage)
@@ -629,7 +642,7 @@ void CompilerUtils::pushZeroValue(const Type& _type)
 	m_context << eth::Instruction::DUP1;
 
 	if (auto structType = dynamic_cast<StructType const*>(&_type))
-		for (auto const& member: structType->members())
+		for (auto const& member: structType->members(nullptr))
 		{
 			pushZeroValue(*member.type);
 			storeInMemoryDynamic(*member.type);
@@ -646,15 +659,8 @@ void CompilerUtils::pushZeroValue(const Type& _type)
 		{
 			m_context << arrayType->length() << eth::Instruction::SWAP1;
 			// stack: items_to_do memory_pos
-			auto repeat = m_context.newTag();
-			m_context << repeat;
-			pushZeroValue(*arrayType->baseType());
-			storeInMemoryDynamic(*arrayType->baseType());
-			m_context << eth::Instruction::SWAP1 << u256(1) << eth::Instruction::SWAP1;
-			m_context << eth::Instruction::SUB << eth::Instruction::SWAP1;
-			m_context << eth::Instruction::DUP2;
-			m_context.appendConditionalJumpTo(repeat);
-			m_context << eth::Instruction::SWAP1 << eth::Instruction::POP;
+			zeroInitialiseMemoryArray(*arrayType);
+			// stack: updated_memory_pos
 		}
 	}
 	else
@@ -689,18 +695,31 @@ void CompilerUtils::copyToStackTop(unsigned _stackDepth, unsigned _itemSize)
 
 void CompilerUtils::moveToStackTop(unsigned _stackDepth, unsigned _itemSize)
 {
-	solAssert(_stackDepth <= 15, "Stack too deep, try removing local variables.");
-	for (unsigned j = 0; j < _itemSize; ++j)
-		for (unsigned i = 0; i < _stackDepth + _itemSize - 1; ++i)
-			m_context << eth::swapInstruction(1 + i);
+	moveIntoStack(_itemSize, _stackDepth);
 }
 
 void CompilerUtils::moveIntoStack(unsigned _stackDepth, unsigned _itemSize)
 {
-	solAssert(_stackDepth <= 16, "Stack too deep, try removing local variables.");
-	for (unsigned j = 0; j < _itemSize; ++j)
-		for (unsigned i = _stackDepth; i > 0; --i)
-			m_context << eth::swapInstruction(i + _itemSize - 1);
+	if (_stackDepth <= _itemSize)
+		for (unsigned i = 0; i < _stackDepth; ++i)
+			rotateStackDown(_stackDepth + _itemSize);
+	else
+		for (unsigned i = 0; i < _itemSize; ++i)
+			rotateStackUp(_stackDepth + _itemSize);
+}
+
+void CompilerUtils::rotateStackUp(unsigned _items)
+{
+	solAssert(_items - 1 <= 16, "Stack too deep, try removing local variables.");
+	for (unsigned i = 1; i < _items; ++i)
+		m_context << eth::swapInstruction(_items - i);
+}
+
+void CompilerUtils::rotateStackDown(unsigned _items)
+{
+	solAssert(_items - 1 <= 16, "Stack too deep, try removing local variables.");
+	for (unsigned i = 1; i < _items; ++i)
+		m_context << eth::swapInstruction(i);
 }
 
 void CompilerUtils::popStackElement(Type const& _type)
